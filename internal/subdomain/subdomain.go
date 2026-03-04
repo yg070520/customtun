@@ -87,3 +87,30 @@ func IsValid(s string) bool {
 
 	return true
 }
+
+// ValidateCustom validates a user-provided custom subdomain.
+// Rules: 3-32 characters, lowercase letters, numbers, and hyphens only.
+// Cannot start or end with a hyphen, and no consecutive hyphens.
+func ValidateCustom(s string) error {
+	if len(s) < 3 {
+		return fmt.Errorf("too short (minimum 3 characters)")
+	}
+	if len(s) > 32 {
+		return fmt.Errorf("too long (maximum 32 characters)")
+	}
+	if s[0] == '-' {
+		return fmt.Errorf("cannot start with a hyphen")
+	}
+	if s[len(s)-1] == '-' {
+		return fmt.Errorf("cannot end with a hyphen")
+	}
+	for i, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+			return fmt.Errorf("invalid character '%c' (only a-z, 0-9, and hyphens allowed)", c)
+		}
+		if c == '-' && i > 0 && s[i-1] == '-' {
+			return fmt.Errorf("consecutive hyphens are not allowed")
+		}
+	}
+	return nil
+}

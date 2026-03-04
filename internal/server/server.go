@@ -6,7 +6,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"sync"
 	"time"
@@ -16,38 +15,33 @@ import (
 
 	"tunnl.gg/internal/config"
 	"tunnl.gg/internal/subdomain"
-	"tunnl.gg/internal/tunnel"
 )
 
-// Server manages SSH tunnels and HTTP proxying
+// Server manages SSH connections
 type Server struct {
-	tunnels       map[string]*tunnel.Tunnel
-	ipConnections map[string]int
-	sshConns      map[string][]*ssh.ServerConn // SSH connections per IP for forced closure
-	mu            sync.RWMutex
-	sshConfig     *ssh.ServerConfig
-	domain        string
-
-	// Stats
-	totalConnections uint64
-	totalRequests    uint64
+	activeSubdomains map[string]bool
+	ipConnections    map[string]int
+	sshConns         map[string][]*ssh.ServerConn
+	mu               sync.RWMutex
+	sshConfig        *ssh.ServerConfig
+	domain           string
+	caddyAdminURL    string
 
 	// Abuse protection
 	abuseTracker *AbuseTracker
 }
 
 // New creates a new server instance
-func New(hostKeyPath string, domain string) (*Server, error) {
+func New(hostKeyPath string, domain string, caddyAdminURL string) (*Server, error) {
 	s := &Server{
-		tunnels:       make(map[string]*tunnel.Tunnel),
-		ipConnections: make(map[string]int),
-		sshConns:      make(map[string][]*ssh.ServerConn),
-		abuseTracker:  NewAbuseTracker(),
-		domain:        domain,
+		activeSubdomains: make(map[string]bool),
+		ipConnections:    make(map[string]int),
+		sshConns:         make(map[string][]*ssh.ServerConn),
+		abuseTracker:     NewAbuseTracker(),
+		domain:           domain,
+		caddyAdminURL:    caddyAdminURL,
 	}
 
-	// Set callback to close SSH connections when IP is blocked
-	// Closing SSH connections triggers cleanup which removes tunnels via defers
 	s.abuseTracker.SetOnBlockCallback(func(ip string) {
 		connCount := s.CloseAllForIP(ip)
 		if connCount > 0 {
@@ -71,11 +65,6 @@ func New(hostKeyPath string, domain string) (*Server, error) {
 // Domain returns the configured domain
 func (s *Server) Domain() string {
 	return s.domain
-}
-
-// SSHConfig returns the SSH server configuration
-func (s *Server) SSHConfig() *ssh.ServerConfig {
-	return s.sshConfig
 }
 
 func loadOrGenerateHostKey(path string) (ssh.Signer, error) {
@@ -115,7 +104,7 @@ func (s *Server) GenerateUniqueSubdomain() (string, error) {
 		}
 
 		s.mu.RLock()
-		_, exists := s.tunnels[sub]
+		exists := s.activeSubdomains[sub]
 		s.mu.RUnlock()
 
 		if !exists {
@@ -125,39 +114,52 @@ func (s *Server) GenerateUniqueSubdomain() (string, error) {
 	return "", fmt.Errorf("failed to generate unique subdomain after %d attempts", maxAttempts)
 }
 
+// AddSubdomain adds a subdomain to the active set
+func (s *Server) AddSubdomain(sub string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activeSubdomains[sub] = true
+}
+
+// RemoveSubdomain removes a subdomain from the active set
+func (s *Server) RemoveSubdomain(sub string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.activeSubdomains, sub)
+}
+
+// IsSubdomainTaken checks if a subdomain is currently in use
+func (s *Server) IsSubdomainTaken(sub string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.activeSubdomains[sub]
+}
+
 // CheckAndReserveConnection checks if a new connection from the given IP is allowed
-// and atomically reserves a slot if allowed. Returns true if reservation was made.
+// and atomically reserves a slot if allowed.
 // Caller MUST call DecrementIPConnection when done if this returns nil.
 func (s *Server) CheckAndReserveConnection(clientIP string) error {
-	// Check if IP is blocked
 	if expiry := s.abuseTracker.GetBlockExpiry(clientIP); !expiry.IsZero() {
 		remaining := time.Until(expiry).Round(time.Minute)
 		return fmt.Errorf("IP %s is temporarily blocked. Try again in %v", clientIP, remaining)
 	}
 
-	// Check connection rate limit
 	if !s.abuseTracker.CheckConnectionRate(clientIP) {
-		return fmt.Errorf("connection rate limit exceeded: max %d connections per minute. Repeated violations will result in a temporary block", config.MaxConnectionsPerMinute)
+		return fmt.Errorf("connection rate limit exceeded: max %d connections per minute", config.MaxConnectionsPerMinute)
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.ipConnections[clientIP] >= config.MaxTunnelsPerIP {
-		return fmt.Errorf("rate limit exceeded: max %d tunnels per IP", config.MaxTunnelsPerIP)
+		return fmt.Errorf("rate limit exceeded: max %d connections per IP", config.MaxTunnelsPerIP)
 	}
-	if len(s.tunnels) >= config.MaxTotalTunnels {
-		return fmt.Errorf("server capacity reached: max %d total tunnels", config.MaxTotalTunnels)
+	if len(s.activeSubdomains) >= config.MaxTotalTunnels {
+		return fmt.Errorf("server capacity reached: max %d total connections", config.MaxTotalTunnels)
 	}
 
-	// Atomically reserve the connection slot
 	s.ipConnections[clientIP]++
 	return nil
-}
-
-// BlockIP blocks an IP address
-func (s *Server) BlockIP(ip string) {
-	s.abuseTracker.BlockIP(ip)
 }
 
 // DecrementIPConnection decrements the connection count for an IP
@@ -168,33 +170,6 @@ func (s *Server) DecrementIPConnection(clientIP string) {
 		delete(s.ipConnections, clientIP)
 	}
 	s.mu.Unlock()
-}
-
-// RegisterTunnel registers a new tunnel
-func (s *Server) RegisterTunnel(sub string, listener net.Listener, bindAddr string, bindPort uint32, clientIP string) *tunnel.Tunnel {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	t := tunnel.New(sub, listener, bindAddr, bindPort, clientIP)
-	s.tunnels[sub] = t
-	return t
-}
-
-// RemoveTunnel removes and closes a tunnel
-func (s *Server) RemoveTunnel(sub string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if t, ok := s.tunnels[sub]; ok {
-		t.Close()
-		delete(s.tunnels, sub)
-	}
-}
-
-// GetTunnel retrieves a tunnel by subdomain
-func (s *Server) GetTunnel(sub string) *tunnel.Tunnel {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.tunnels[sub]
 }
 
 // RegisterSSHConn registers an SSH connection for an IP (for forced closure on block)
@@ -210,7 +185,6 @@ func (s *Server) UnregisterSSHConn(clientIP string, conn *ssh.ServerConn) {
 	defer s.mu.Unlock()
 
 	conns := s.sshConns[clientIP]
-	// Build new slice without the target connection
 	newConns := make([]*ssh.ServerConn, 0, len(conns))
 	for _, c := range conns {
 		if c != conn {
@@ -226,21 +200,14 @@ func (s *Server) UnregisterSSHConn(clientIP string, conn *ssh.ServerConn) {
 }
 
 // CloseAllForIP closes all SSH connections for a specific IP
-// Closing SSH connections triggers cleanup which removes tunnels via defers
-// Returns the number of connections closed
 func (s *Server) CloseAllForIP(ip string) int {
-	// Collect connections while holding the lock
 	s.mu.Lock()
 	sshConns := s.sshConns[ip]
-	// Make a copy of the slice since we'll modify the map after releasing lock
 	connsCopy := make([]*ssh.ServerConn, len(sshConns))
 	copy(connsCopy, sshConns)
-	// Remove from map now to prevent double-close attempts
 	delete(s.sshConns, ip)
 	s.mu.Unlock()
 
-	// Close connections outside the lock to avoid deadlock
-	// The cleanup handlers (UnregisterSSHConn) will be no-ops since we already removed from map
 	for _, conn := range connsCopy {
 		conn.Close()
 	}
