@@ -1,379 +1,146 @@
-# Tunnl.gg
+# CustomTun
 
-A minimal SSH tunneling service. Expose your local apps to the internet with a single command.
+一个轻量级 SSH 隧道服务，配合 Caddy 实现自定义域名的 HTTP 反向代理。通过一条 SSH 命令，将本地服务暴露到公网。
+
+## 核心特性
+
+- **自定义子域名** — 交互式输入自定义子域名，或自动生成随机域名
+- **Caddy 集成** — 自动通过 Caddy Admin API 注册/注销反向代理路由，支持自动 HTTPS
+- **SSH 端口转发** — 基于 SSH `-R` 参数实现安全的远程端口转发
+- **零客户端配置** — 客户端只需标准 SSH 命令，无需安装额外工具
+- **连接保护** — IP 速率限制、并发限制、自动封禁等滥用防护机制
+
+## 快速使用
 
 ```bash
-ssh -t -R 80:localhost:8080 proxy.tunnl.gg
+ssh -p 8888 -t -R 8080:localhost:8080 yourdomain.com
 ```
 
-> **Note:** The `-t` flag is required to allocate a TTY, which allows the server to display your tunnel URL.
+连接后进入交互界面：
 
-## Features
+```
+Welcome to yourdomain.com!
+You can choose a custom subdomain or get a random one.
+Rules: 3-32 chars, lowercase letters, numbers, and hyphens only.
 
-- Memorable subdomain per connection (e.g., `https://happy-tiger-a1b2c3d4.tunnl.gg`)
-- Automatic SSL via Let's Encrypt
-- WebSocket support
-- Comprehensive rate limiting and abuse protection
-- Phishing protection via interstitial warning page
-- Built-in stats/metrics endpoint
-- No authentication required
-- Zero configuration for clients
+Enter subdomain (or press Enter for random): myapp
 
-### Limits & Protection
+Connection successful!
+Assigned domain: myapp.yourdomain.com
+Forwarding:     myapp.yourdomain.com -> localhost:8080
+Press Ctrl+C to disconnect.
+```
 
-| Limit | Value | Description |
-|-------|-------|-------------|
-| Tunnels per IP | 3 | Max concurrent tunnels per IP address |
-| Total tunnels | 1000 | Server-wide tunnel limit |
-| Requests per tunnel | 10/s (burst 20) | Token bucket rate limiting |
-| Request body size | 128 MB | Max upload size |
-| Response body size | 128 MB | Max response size |
-| WebSocket transfer | 1 GB per direction | Max data per WebSocket connection |
-| WebSocket idle timeout | 2 hours | WebSocket closed after inactivity |
-| SSH handshake timeout | 30 seconds | Max time for SSH handshake to complete |
-| Connections per minute | 10 | New SSH connections per IP |
-| Inactivity timeout | 2 hours | Tunnel closes after inactivity |
-| Max tunnel lifetime | 24 hours | Absolute tunnel lifetime limit |
-| Block duration | 1 hour | Temporary IP block after abuse |
-| Violations before block | 10 | Rate limit violations before tunnel kill + IP block |
+访问 `https://myapp.yourdomain.com` 即可访问本地 `localhost:8080` 的服务。
 
-## Project Structure
+## 工作原理
 
 ```text
-tunnl.gg/
-├── cmd/tunnl/              # Application entry point
-├── internal/
-│   ├── config/             # Configuration and constants
-│   │   └── config.go
-│   ├── server/             # Server implementation
-│   │   ├── server.go       # Server struct, tunnel registry
-│   │   ├── ssh.go          # SSH connection handling
-│   │   ├── http.go         # HTTP/HTTPS handlers
-│   │   ├── stats.go        # Stats tracking and endpoint
-│   │   └── abuse.go        # Abuse tracking and IP blocking
-│   ├── subdomain/          # Subdomain generation/validation
-│   │   └── subdomain.go
-│   └── tunnel/             # Tunnel and rate limiter
-│       ├── tunnel.go
-│       └── ratelimiter.go
-├── Dockerfile              # Multi-stage build (scratch image)
-├── docker-compose.yml      # Production deployment
-└── Makefile                # Build commands
+客户端                          服务器
+┌──────────┐    SSH -R     ┌──────────────┐     Caddy API      ┌───────────┐
+│ App:8080 │◄──────────────│ CustomTun    │────────────────────►│  Caddy    │
+└──────────┘  端口转发      │ (SSH :8888)  │  注册/注销路由      │ (HTTPS)   │
+                           └──────────────┘                    └─────┬─────┘
+                                  ▲                                  │
+                                  │         ┌────────────────┐       │
+                                  └─────────│ Tunnel Listener│◄──────┘
+                                            │ 127.0.0.1:rand │  反向代理
+                                            └────────────────┘
 ```
 
-## Quick Start with Docker
+1. 客户端通过 `ssh -R` 建立 SSH 端口转发
+2. 服务端交互提示输入子域名（或自动生成）
+3. 服务端调用 Caddy Admin API 注册路由 `subdomain.domain → 127.0.0.1:<随机端口>`
+4. 外部请求到达 Caddy → 转发到本地 listener → 通过 SSH 转发到客户端
+5. 客户端断开时自动删除 Caddy 路由
 
-### Prerequisites
+## 前置条件
 
-- Docker and Docker Compose
-- A domain with DNS pointing to your server
-- SSL certificates (see below)
+- 已安装并运行 [Caddy](https://caddyserver.com/)，Admin API 监听 `localhost:2019`
+- 域名 DNS 已配置通配符解析：`*.yourdomain.com → YOUR_SERVER_IP`
+- Go 1.24+（编译时需要）
 
-### 1. DNS Configuration
+## 部署
+
+### 1. DNS 配置
 
 ```text
 A    yourdomain.com      → YOUR_SERVER_IP
 A    *.yourdomain.com    → YOUR_SERVER_IP
 ```
 
-### 2. Obtain SSL Certificates
+### 2. Caddy 配置
+
+确保 Caddy 运行并有基础 HTTP 服务配置（Admin API 默认监听 `localhost:2019`）。
+
+### 3. 编译运行
 
 ```bash
-# Install certbot
-sudo apt install certbot
-
-# Get wildcard certificate (requires DNS challenge)
-sudo certbot certonly --manual --preferred-challenges dns \
-  -d yourdomain.com -d '*.yourdomain.com'
-
-# Or use HTTP challenge for single domain first
-sudo certbot certonly --standalone -d yourdomain.com
+git clone https://github.com/yg070520/customtun.git
+cd customtun
+go build -o customtun cmd/tunnl/main.go
+./customtun
 ```
 
-### 3. Deploy
+## 配置
 
-```bash
-# Clone the repository
-git clone https://github.com/klipitkas/tunnl.gg.git
-cd tunnl.gg
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
+| `SSH_ADDR` | `:8888` | SSH 监听地址 |
+| `HOST_KEY_PATH` | `host_key` | SSH Host Key 路径（首次运行自动生成） |
+| `DOMAIN` | `jatus.top` | 服务域名 |
+| `CADDY_ADMIN_URL` | `http://localhost:2019` | Caddy Admin API 地址 |
 
-# Create data directories
-mkdir -p data/certs
-
-# Copy certificates
-sudo cp /etc/letsencrypt/live/yourdomain.com/fullchain.pem data/certs/
-sudo cp /etc/letsencrypt/live/yourdomain.com/privkey.pem data/certs/
-sudo chown -R $USER:$USER data/certs
-
-# Start the service
-docker compose up -d
-
-# View logs
-docker compose logs -f
-```
-
-### 4. Move Server SSH (Important!)
-
-Your server's SSH likely uses port 22. Move it so tunnl can use it:
-
-```bash
-sudo nano /etc/ssh/sshd_config
-# Change: Port 22 → Port 2222
-
-sudo ufw allow 2222/tcp
-sudo systemctl restart sshd
-```
-
-**Test the new port before closing your session:**
-
-```bash
-ssh -p 2222 user@your-server
-```
-
-## Manual Installation
-
-### Build from Source
-
-```bash
-# Requires Go 1.24+
-git clone https://github.com/klipitkas/tunnl.gg.git
-cd tunnl.gg
-
-# Build optimized binary (~6MB)
-make build-small
-
-# Or build for all platforms
-make build-all
-```
-
-### Systemd Service
-
-```bash
-sudo nano /etc/systemd/system/tunnl.service
-```
-
-```ini
-[Unit]
-Description=Tunnl.gg SSH Tunnel Service
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/tunnl
-ExecStart=/opt/tunnl/tunnl
-Restart=always
-RestartSec=5
-
-Environment=SSH_ADDR=:22
-Environment=HTTP_ADDR=:80
-Environment=HTTPS_ADDR=:443
-Environment=STATS_ADDR=127.0.0.1:9090
-Environment=HOST_KEY_PATH=/opt/tunnl/host_key
-Environment=TLS_CERT=/etc/letsencrypt/live/yourdomain.com/fullchain.pem
-Environment=TLS_KEY=/etc/letsencrypt/live/yourdomain.com/privkey.pem
-Environment=DOMAIN=yourdomain.com
-
-NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths=/opt/tunnl
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo mkdir -p /opt/tunnl
-sudo cp bin/tunnl /opt/tunnl/
-sudo chmod +x /opt/tunnl/tunnl
-sudo systemctl daemon-reload
-sudo systemctl enable --now tunnl
-```
-
-## Configuration
-
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
-| `SSH_ADDR` | `:22` | SSH server listen address |
-| `HTTP_ADDR` | `:80` | HTTP server listen address |
-| `HTTPS_ADDR` | `:443` | HTTPS server listen address |
-| `STATS_ADDR` | `127.0.0.1:9090` | Stats endpoint (localhost only) |
-| `HOST_KEY_PATH` | `host_key` | Path to SSH host key |
-| `TLS_CERT` | `/etc/letsencrypt/live/tunnl.gg/fullchain.pem` | TLS certificate path |
-| `TLS_KEY` | `/etc/letsencrypt/live/tunnl.gg/privkey.pem` | TLS private key path |
-| `DOMAIN` | `tunnl.gg` | Domain name for the service |
-
-## Usage
-
-### Basic
-
-```bash
-# Expose local port 8080
-ssh -t -R 80:localhost:8080 proxy.tunnl.gg
-```
-
-### Expose a Different Host
-
-```bash
-ssh -t -R 80:192.168.1.100:3000 proxy.tunnl.gg
-```
-
-### Keep Connection Alive
-
-```bash
-ssh -t -R 80:localhost:8080 -o ServerAliveInterval=60 proxy.tunnl.gg
-```
-
-### Bypass Interstitial Warning
-
-Browser requests show a phishing warning (cookie-based, lasts 1 day). To skip programmatically:
-
-```bash
-curl -H "tunnl-skip-browser-warning: 1" https://happy-tiger-a1b2c3d4.tunnl.gg
-```
-
-## Stats Endpoint
-
-Query server statistics (localhost only):
-
-```bash
-# Basic stats
-curl http://127.0.0.1:9090/
-
-# Include active subdomains
-curl "http://127.0.0.1:9090/?subdomains=true"
-```
-
-Response:
-
-```json
-{
-  "active_tunnels": 3,
-  "unique_ips": 2,
-  "total_connections": 15,
-  "total_requests": 1247,
-  "blocked_ips": 1,
-  "total_blocked": 5,
-  "total_rate_limited": 23,
-  "subdomains": ["happy-tiger-a1b2c3d4", "calm-eagle-e5f6a7b8", "swift-wolf-d9e0f1a2"]
-}
-```
-
-## Makefile Commands
-
-| Command | Description |
-|---------|-------------|
-| `make build` | Standard optimized build |
-| `make build-small` | Maximum size optimization (~6MB) |
-| `make build-tiny` | With UPX compression (if installed) |
-| `make build-all` | Cross-compile for Linux/macOS |
-| `make build-dev` | Fast build with debug symbols |
-| `make test` | Run tests |
-| `make clean` | Remove build artifacts |
-
-## How It Works
+## 项目结构
 
 ```text
-┌─────────────────────────────────────────────────────────────────┐
-│                        TUNNL SERVER                             │
-│                                                                 │
-│  ┌─────────────┐  ┌─────────────┐  ┌───────────┐  ┌───────────┐ │
-│  │ SSH :22     │  │ HTTP :80    │  │HTTPS :443 │  │Stats :9090│ │
-│  │             │  │             │  │           │  │           │ │
-│  │ Accepts -R  │  │ ACME + 301  │  │ TLS term  │  │ Metrics   │ │
-│  │ connections │  │ redirect    │  │ Rev proxy │  │ (local)   │ │
-│  └──────┬──────┘  └─────────────┘  └─────┬─────┘  └───────────┘ │
-│         │                                │                      │
-│         ▼                                ▼                      │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │                    Tunnel Registry                          ││
-│  │              map[subdomain]*Tunnel                          ││
-│  └─────────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────────┘
-         │                                │
-         ▼                                │
-   ┌──────────┐     HTTPS request to      │
-   │ SSH Conn │  ←─ happy-tiger-a1b2c3d4 ─────┘
-   │ Client   │
-   └────┬─────┘
-        │
-        ▼
-   ┌──────────┐
-   │ App:8080 │
-   └──────────┘
+customtun/
+├── cmd/tunnl/              # 程序入口
+│   └── main.go
+├── internal/
+│   ├── config/             # 配置常量
+│   │   └── config.go
+│   ├── server/             # 服务端实现
+│   │   ├── server.go       # Server 结构体，子域名管理
+│   │   ├── ssh.go          # SSH 连接处理，交互式子域名选择
+│   │   ├── caddy.go        # Caddy Admin API 路由管理
+│   │   └── abuse.go        # 滥用追踪与 IP 封禁
+│   └── subdomain/          # 子域名生成与校验
+│       └── subdomain.go
+├── Dockerfile
+├── docker-compose.yml
+└── Makefile
 ```
 
-1. Client runs `ssh -t -R 80:localhost:8080 proxy.tunnl.gg`
-2. Server generates subdomain (e.g., `happy-tiger-a1b2c3d4`) and shows URL
-3. Browser requests `https://happy-tiger-a1b2c3d4.tunnl.gg`
-4. Server looks up tunnel, proxies request via SSH to client
-5. Client forwards to `localhost:8080`
+## 保护机制
 
-## Running Multiple Instances
+| 限制项 | 值 | 说明 |
+|--------|-----|------|
+| 每 IP 并发连接 | 3 | 单 IP 最多同时 3 个隧道 |
+| 总连接数 | 1000 | 服务器最大隧道数 |
+| 每分钟新连接 | 10 | 单 IP 每分钟最多新建 10 个连接 |
+| SSH 握手超时 | 30s | 握手未完成则断开 |
+| IP 封禁时长 | 1 小时 | 触发封禁后的屏蔽时间 |
+| 触发封禁阈值 | 10 次违规 | 累计违规次数达到后自动封禁 |
 
-You can run multiple instances on the same server using different ports:
+## 客户端建议
+
+### 保持连接稳定
 
 ```bash
-# Instance 1 (production) - default ports
-./tunnl
-
-# Instance 2 (dev) - alternate ports
-SSH_ADDR=:2223 HTTP_ADDR=:8080 HTTPS_ADDR=:8443 STATS_ADDR=127.0.0.1:9091 \
-HOST_KEY_PATH=./host_key_dev ./tunnl
+ssh -p 8888 -t -R 8080:localhost:8080 \
+  -o "ServerAliveInterval=10" \
+  -o "ServerAliveCountMax=3" \
+  yourdomain.com
 ```
 
-Connect to dev instance: `ssh -t -R 80:localhost:8080 proxy.tunnl.gg -p 2223`
-
-## Troubleshooting
-
-### Connection Refused
+### 使用 autossh 自动重连
 
 ```bash
-# Check service status
-docker compose ps
-# or
-sudo systemctl status tunnl
-
-# Check ports
-sudo ss -tlnp | grep -E ':(22|80|443)'
-
-# Check firewall
-sudo ufw status
-```
-
-### Host Key Verification Failed
-
-First-time clients must accept the host key:
-
-```bash
-ssh -t -R 80:localhost:8080 proxy.tunnl.gg
-# Are you sure you want to continue connecting (yes/no)? yes
-```
-
-### No Output / Connection Hangs
-
-The `-t` flag is **required**:
-
-```bash
-# Wrong
-ssh -R 80:localhost:8080 proxy.tunnl.gg
-
-# Correct
-ssh -t -R 80:localhost:8080 proxy.tunnl.gg
-```
-
-### Certificate Issues
-
-```bash
-# Check certificate files
-ls -la data/certs/
-
-# Renew certificates
-sudo certbot renew
-
-# Copy renewed certs and restart
-sudo cp /etc/letsencrypt/live/yourdomain.com/*.pem data/certs/
-docker compose restart
+autossh -M 0 -p 8888 -t -R 8080:localhost:8080 \
+  -o "ServerAliveInterval=10" \
+  -o "ServerAliveCountMax=3" \
+  yourdomain.com
 ```
 
 ## License
