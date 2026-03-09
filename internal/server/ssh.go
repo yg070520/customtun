@@ -109,7 +109,10 @@ func (s *Server) HandleSSHConnection(conn net.Conn) {
 		}
 	}()
 
-	// Wait for a session channel with timeout
+	// Collect session channel and bind info concurrently.
+	// We need to determine the mode of operation:
+	//   1. Embedded subdomain via -R (supports -N/-f, no session channel needed)
+	//   2. Interactive mode (session channel required for prompt)
 	sessionReceived := make(chan ssh.NewChannel, 1)
 	go func() {
 		for newChannel := range chans {
@@ -121,11 +124,130 @@ func (s *Server) HandleSSHConnection(conn net.Conn) {
 		}
 	}()
 
+	// Session ID for ownership tracking (unique per connection)
+	sessionID := fmt.Sprintf("%p", sshConn)
+
+	// Wait for tcpip-forward first to detect embedded subdomain.
+	var bind bindInfo
+	var hasBind bool
+	var embeddedSub string
+
+	select {
+	case bind = <-bindCh:
+		hasBind = true
+		embeddedSub = extractSubdomainFromBindAddr(bind.addr)
+	case <-time.After(5 * time.Second):
+		// No bind info yet
+	}
+
+	// --- Mode 1: Embedded subdomain (supports -f, -N, no session channel needed) ---
+	if embeddedSub != "" {
+		sub := embeddedSub
+
+		// Release in-memory tracking if subdomain is held by another session
+		if s.IsSubdomainTaken(sub) {
+			log.Printf("Force takeover of subdomain (in-memory): %s", sub)
+			s.ForceReleaseSubdomain(sub)
+		}
+
+		// Always try to remove old Caddy route
+		log.Printf("Removing old Caddy route for %s (if any)", sub)
+		_ = s.removeCaddyRoute(sub)
+
+		s.AddSubdomain(sub, sessionID)
+		defer func() {
+			if s.RemoveSubdomain(sub, sessionID) {
+				if err := s.removeCaddyRoute(sub); err != nil {
+					log.Printf("Failed to remove Caddy route for %s: %v", sub, err)
+				}
+			}
+		}()
+
+		domain := fmt.Sprintf("%s.%s", sub, s.domain)
+		listenerAddr := tunnelListener.Addr().String()
+
+		log.Printf("Registering Caddy route: %s -> %s", domain, listenerAddr)
+		if err := s.registerCaddyRoute(sub, domain, listenerAddr); err != nil {
+			log.Printf("Failed to register Caddy route for %s: %v", sub, err)
+			return
+		}
+		log.Printf("Caddy route registered: %s -> %s", domain, listenerAddr)
+		log.Printf("Subdomain assigned: %s -> %s (client: %s, forward port: %d)",
+			domain, listenerAddr, sshConn.RemoteAddr(), bind.port)
+
+		// Accept connections on tunnel listener and forward to SSH client
+		go func() {
+			for {
+				tcpConn, err := tunnelListener.Accept()
+				if err != nil {
+					return
+				}
+				go s.forwardToSSH(sshConn, tcpConn, bind.addr, bind.port)
+			}
+		}()
+
+		// Optionally handle session channel if present (for interactive -t usage),
+		// but always keep connection alive via sshConn.Wait()
+		go func() {
+			select {
+			case sessionChannel, ok := <-sessionReceived:
+				if !ok {
+					return
+				}
+				channel, requests, err := sessionChannel.Accept()
+				if err != nil {
+					return
+				}
+				go func() {
+					for req := range requests {
+						switch req.Type {
+						case "pty-req", "shell":
+							if req.WantReply {
+								req.Reply(true, nil)
+							}
+						default:
+							if req.WantReply {
+								req.Reply(false, nil)
+							}
+						}
+					}
+				}()
+
+				fmt.Fprintf(channel, ansiGray+"Using subdomain: "+ansiPurple+"%s"+ansiReset+"\r\n", domain)
+				message := "\r\n" +
+					ansiBoldGreen + "Connection successful!" + ansiReset + "\r\n" +
+					ansiGray + "Assigned domain: " + ansiPurple + domain + ansiReset + "\r\n" +
+					ansiGray + "Forwarding:     " + ansiPurple + fmt.Sprintf("%s -> localhost:%d", domain, bind.port) + ansiReset + "\r\n" +
+					ansiGray + "Press Ctrl+C to disconnect." + ansiReset + "\r\n\r\n"
+				fmt.Fprint(channel, message)
+
+				// Read but don't close sshConn on channel EOF — let sshConn.Wait() handle lifecycle
+				buf := make([]byte, 1)
+				for {
+					_, err := channel.Read(buf)
+					if err != nil {
+						break
+					}
+					if buf[0] == 0x03 { // Ctrl+C
+						sshConn.Close()
+						return
+					}
+				}
+			}
+		}()
+
+		// Keep connection alive until SSH connection itself closes
+		sshConn.Wait()
+		log.Printf("SSH connection closed for subdomain: %s", sub)
+		return
+	}
+
+	// --- Mode 2: Interactive mode (session channel required) ---
 	var sessionChannel ssh.NewChannel
 	select {
 	case sessionChannel = <-sessionReceived:
 	case <-time.After(5 * time.Second):
-		log.Printf("Connection from %s rejected: no session channel", sshConn.RemoteAddr())
+		log.Printf("Connection from %s rejected: no session channel and no embedded subdomain", sshConn.RemoteAddr())
 		return
 	}
 
@@ -157,43 +279,10 @@ func (s *Server) HandleSSHConnection(conn net.Conn) {
 		}
 	}(requests)
 
-	// Session ID for ownership tracking (unique per connection)
-	sessionID := fmt.Sprintf("%p", sshConn)
-
-	// Try to get bind info early to check for embedded subdomain in bind address.
-	// When the client uses: ssh -R <subdomain>:<port>:localhost:<port> host
-	// the bind address will contain the subdomain name (e.g. "green").
-	var bind bindInfo
-	var hasBind bool
-	var embeddedSub string
-
-	select {
-	case bind = <-bindCh:
-		hasBind = true
-		embeddedSub = extractSubdomainFromBindAddr(bind.addr)
-	case <-time.After(1 * time.Second):
-		// No bind info yet — will prompt interactively and wait later
-	}
-
-	var sub string
-	if embeddedSub != "" {
-		sub = embeddedSub
-
-		// Force takeover if subdomain is already in use
-		if s.IsSubdomainTaken(sub) {
-			log.Printf("Force takeover of subdomain: %s", sub)
-			s.ForceReleaseSubdomain(sub)
-			// Remove old Caddy route (ignore error — may already be gone)
-			_ = s.removeCaddyRoute(sub)
-		}
-
-		fmt.Fprintf(channel, ansiGray+"Using subdomain: "+ansiPurple+"%s.%s"+ansiReset+"\r\n", sub, s.domain)
-	} else {
-		// Interactive subdomain selection
-		sub = s.promptSubdomain(channel, sshConn)
-		if sub == "" {
-			return // connection closed during prompt
-		}
+	// Interactive subdomain selection
+	sub := s.promptSubdomain(channel, sshConn)
+	if sub == "" {
+		return // connection closed during prompt
 	}
 
 	s.AddSubdomain(sub, sessionID)

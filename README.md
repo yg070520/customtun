@@ -5,6 +5,7 @@
 ## 核心特性
 
 - **自定义子域名** — 交互式输入自定义子域名，或自动生成随机域名
+- **命令行指定子域名** — 通过 `-R` 参数直接指定子域名，跳过交互提示，支持强制接管已有子域名
 - **Caddy 集成** — 自动通过 Caddy Admin API 注册/注销反向代理路由，支持自动 HTTPS
 - **SSH 端口转发** — 基于 SSH `-R` 参数实现安全的远程端口转发
 - **零客户端配置** — 客户端只需标准 SSH 命令，无需安装额外工具
@@ -12,11 +13,34 @@
 
 ## 快速使用
 
+### 方式一：命令行直接指定子域名（推荐）
+
+通过 `-R` 参数中的 bind address 直接指定子域名，无需交互输入：
+
+```bash
+ssh -p 8888 -t -R myapp:80:localhost:8080 yourdomain.com
+```
+
+输出：
+
+```
+Using subdomain: myapp.yourdomain.com
+
+Connection successful!
+Assigned domain: myapp.yourdomain.com
+Forwarding:     myapp.yourdomain.com -> localhost:80
+Press Ctrl+C to disconnect.
+```
+
+如果子域名 `myapp` 已被其他连接占用，新连接会**自动强制接管**（删除旧 Caddy 路由并重新注册），无需手动操作。
+
+### 方式二：交互式选择子域名
+
+不指定子域名时，连接后进入交互界面：
+
 ```bash
 ssh -p 8888 -t -R 8080:localhost:8080 yourdomain.com
 ```
-
-连接后进入交互界面：
 
 ```
 Welcome to yourdomain.com!
@@ -49,10 +73,11 @@ Press Ctrl+C to disconnect.
 ```
 
 1. 客户端通过 `ssh -R` 建立 SSH 端口转发
-2. 服务端交互提示输入子域名（或自动生成）
-3. 服务端调用 Caddy Admin API 注册路由 `subdomain.domain → 127.0.0.1:<随机端口>`
-4. 外部请求到达 Caddy → 转发到本地 listener → 通过 SSH 转发到客户端
-5. 客户端断开时自动删除 Caddy 路由
+2. 服务端从 `-R` 的 bind address 提取子域名（如 `-R myapp:80:...`），若无则交互提示输入
+3. 若指定的子域名已被占用，自动强制接管（删除旧路由）
+4. 服务端调用 Caddy Admin API 注册路由 `subdomain.domain → 127.0.0.1:<随机端口>`
+5. 外部请求到达 Caddy → 转发到本地 listener → 通过 SSH 转发到客户端
+6. 客户端断开时自动删除 Caddy 路由（仅当前连接仍为该子域名的所有者时）
 
 ## 前置条件
 
@@ -125,10 +150,19 @@ customtun/
 
 ## 客户端建议
 
+### 命令行指定子域名
+
+```bash
+# 将 localhost:3000 暴露为 myapp.yourdomain.com
+ssh -p 8888 -t -R myapp:80:localhost:3000 yourdomain.com
+```
+
+`-R` 参数格式为 `<子域名>:<远程端口>:<本地地址>:<本地端口>`，其中 `<子域名>` 会被服务器识别为目标子域名。
+
 ### 保持连接稳定
 
 ```bash
-ssh -p 8888 -t -R 8080:localhost:8080 \
+ssh -p 8888 -t -R myapp:80:localhost:8080 \
   -o "ServerAliveInterval=10" \
   -o "ServerAliveCountMax=3" \
   yourdomain.com
@@ -137,7 +171,7 @@ ssh -p 8888 -t -R 8080:localhost:8080 \
 ### 使用 autossh 自动重连
 
 ```bash
-autossh -M 0 -p 8888 -t -R 8080:localhost:8080 \
+autossh -M 0 -p 8888 -t -R myapp:80:localhost:8080 \
   -o "ServerAliveInterval=10" \
   -o "ServerAliveCountMax=3" \
   yourdomain.com
