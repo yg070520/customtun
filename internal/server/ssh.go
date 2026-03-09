@@ -157,41 +157,76 @@ func (s *Server) HandleSSHConnection(conn net.Conn) {
 		}
 	}(requests)
 
-	// Interactive subdomain selection
-	sub := s.promptSubdomain(channel, sshConn)
-	if sub == "" {
-		return // connection closed during prompt
+	// Session ID for ownership tracking (unique per connection)
+	sessionID := fmt.Sprintf("%p", sshConn)
+
+	// Try to get bind info early to check for embedded subdomain in bind address.
+	// When the client uses: ssh -R <subdomain>:<port>:localhost:<port> host
+	// the bind address will contain the subdomain name (e.g. "green").
+	var bind bindInfo
+	var hasBind bool
+	var embeddedSub string
+
+	select {
+	case bind = <-bindCh:
+		hasBind = true
+		embeddedSub = extractSubdomainFromBindAddr(bind.addr)
+	case <-time.After(1 * time.Second):
+		// No bind info yet — will prompt interactively and wait later
 	}
 
-	s.AddSubdomain(sub)
-	defer s.RemoveSubdomain(sub)
+	var sub string
+	if embeddedSub != "" {
+		sub = embeddedSub
+
+		// Force takeover if subdomain is already in use
+		if s.IsSubdomainTaken(sub) {
+			log.Printf("Force takeover of subdomain: %s", sub)
+			s.ForceReleaseSubdomain(sub)
+			// Remove old Caddy route (ignore error — may already be gone)
+			_ = s.removeCaddyRoute(sub)
+		}
+
+		fmt.Fprintf(channel, ansiGray+"Using subdomain: "+ansiPurple+"%s.%s"+ansiReset+"\r\n", sub, s.domain)
+	} else {
+		// Interactive subdomain selection
+		sub = s.promptSubdomain(channel, sshConn)
+		if sub == "" {
+			return // connection closed during prompt
+		}
+	}
+
+	s.AddSubdomain(sub, sessionID)
+	defer func() {
+		if s.RemoveSubdomain(sub, sessionID) {
+			if err := s.removeCaddyRoute(sub); err != nil {
+				log.Printf("Failed to remove Caddy route for %s: %v", sub, err)
+			}
+		}
+	}()
 
 	domain := fmt.Sprintf("%s.%s", sub, s.domain)
 	listenerAddr := tunnelListener.Addr().String()
 
-	// Register route with Caddy immediately after subdomain selection
+	// Register route with Caddy
 	log.Printf("Registering Caddy route: %s -> %s", domain, listenerAddr)
 	if err := s.registerCaddyRoute(sub, domain, listenerAddr); err != nil {
 		log.Printf("Failed to register Caddy route for %s: %v", sub, err)
 		fmt.Fprintf(channel, ansiRed+"  Failed to register route: %s"+ansiReset+"\r\n", err)
 		return
 	}
-	defer func() {
-		if err := s.removeCaddyRoute(sub); err != nil {
-			log.Printf("Failed to remove Caddy route for %s: %v", sub, err)
-		}
-	}()
 	log.Printf("Caddy route registered: %s -> %s", domain, listenerAddr)
 
-	// Wait for tcpip-forward info (port forwarding from -R flag)
-	fmt.Fprintf(channel, ansiGray+"Waiting for port forwarding (-R) ..."+ansiReset+"\r\n")
-	var bind bindInfo
-	select {
-	case bind = <-bindCh:
-	case <-time.After(30 * time.Second):
-		fmt.Fprintf(channel, ansiRed+"  Timeout: no port forwarding received.\r\n"+
-			"  Use: ssh -p 2222 -t -R <port>:localhost:<port> %s"+ansiReset+"\r\n", s.domain)
-		return
+	// Wait for tcpip-forward info if we don't have it yet
+	if !hasBind {
+		fmt.Fprintf(channel, ansiGray+"Waiting for port forwarding (-R) ..."+ansiReset+"\r\n")
+		select {
+		case bind = <-bindCh:
+		case <-time.After(30 * time.Second):
+			fmt.Fprintf(channel, ansiRed+"  Timeout: no port forwarding received.\r\n"+
+				"  Use: ssh -p 2222 -t -R <port>:localhost:<port> %s"+ansiReset+"\r\n", s.domain)
+			return
+		}
 	}
 
 	log.Printf("Subdomain assigned: %s -> %s (client: %s, forward port: %d)",
@@ -270,6 +305,26 @@ func (s *Server) forwardToSSH(sshConn *ssh.ServerConn, tcpConn net.Conn, bindAdd
 		io.Copy(tcpConn, channel)
 	}()
 	<-done
+}
+
+// extractSubdomainFromBindAddr checks if the bind address from a tcpip-forward
+// request contains a subdomain name (rather than an IP address).
+// This allows clients to specify a subdomain via: ssh -R <subdomain>:<port>:localhost:<port> host
+// Returns the subdomain name, or "" if the address is not a subdomain.
+func extractSubdomainFromBindAddr(addr string) string {
+	addr = strings.TrimSpace(strings.ToLower(addr))
+	if addr == "" || addr == "localhost" || addr == "0.0.0.0" || addr == "::" {
+		return ""
+	}
+	// Skip if it's a valid IP address
+	if net.ParseIP(addr) != nil {
+		return ""
+	}
+	// Validate as a custom subdomain
+	if err := subdomain.ValidateCustom(addr); err != nil {
+		return ""
+	}
+	return addr
 }
 
 // promptSubdomain interactively prompts the user through the SSH channel to enter

@@ -19,7 +19,7 @@ import (
 
 // Server manages SSH connections
 type Server struct {
-	activeSubdomains map[string]bool
+	activeSubdomains map[string]string // subdomain -> sessionID (ownership tracking)
 	ipConnections    map[string]int
 	sshConns         map[string][]*ssh.ServerConn
 	mu               sync.RWMutex
@@ -34,7 +34,7 @@ type Server struct {
 // New creates a new server instance
 func New(hostKeyPath string, domain string, caddyAdminURL string) (*Server, error) {
 	s := &Server{
-		activeSubdomains: make(map[string]bool),
+		activeSubdomains: make(map[string]string),
 		ipConnections:    make(map[string]int),
 		sshConns:         make(map[string][]*ssh.ServerConn),
 		abuseTracker:     NewAbuseTracker(),
@@ -104,7 +104,7 @@ func (s *Server) GenerateUniqueSubdomain() (string, error) {
 		}
 
 		s.mu.RLock()
-		exists := s.activeSubdomains[sub]
+		_, exists := s.activeSubdomains[sub]
 		s.mu.RUnlock()
 
 		if !exists {
@@ -114,15 +114,29 @@ func (s *Server) GenerateUniqueSubdomain() (string, error) {
 	return "", fmt.Errorf("failed to generate unique subdomain after %d attempts", maxAttempts)
 }
 
-// AddSubdomain adds a subdomain to the active set
-func (s *Server) AddSubdomain(sub string) {
+// AddSubdomain adds a subdomain to the active set with ownership tracking.
+// sessionID uniquely identifies the connection that owns this subdomain.
+func (s *Server) AddSubdomain(sub string, sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.activeSubdomains[sub] = true
+	s.activeSubdomains[sub] = sessionID
 }
 
-// RemoveSubdomain removes a subdomain from the active set
-func (s *Server) RemoveSubdomain(sub string) {
+// RemoveSubdomain removes a subdomain only if the caller is the current owner.
+// Returns true if the subdomain was actually removed.
+func (s *Server) RemoveSubdomain(sub string, sessionID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.activeSubdomains[sub] == sessionID {
+		delete(s.activeSubdomains, sub)
+		return true
+	}
+	return false
+}
+
+// ForceReleaseSubdomain removes a subdomain regardless of ownership.
+// Used during subdomain takeover.
+func (s *Server) ForceReleaseSubdomain(sub string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.activeSubdomains, sub)
@@ -132,7 +146,8 @@ func (s *Server) RemoveSubdomain(sub string) {
 func (s *Server) IsSubdomainTaken(sub string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.activeSubdomains[sub]
+	_, exists := s.activeSubdomains[sub]
+	return exists
 }
 
 // CheckAndReserveConnection checks if a new connection from the given IP is allowed
