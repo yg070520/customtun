@@ -18,7 +18,7 @@ func main() {
 		CaddyAdminURL string
 	}{
 		SSHAddr:       ":8888",
-		HostKeyPath:   "host_key",
+		HostKeyPath:   "/host_key",
 		Domain:        "jatus.top",
 		CaddyAdminURL: "http://localhost:2019",
 	}

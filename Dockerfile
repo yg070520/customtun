@@ -24,6 +24,7 @@ FROM scratch
 
 # Copy CA certificates for HTTPS
 #COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /app/host_key /host_key
 
 # Copy binary
 COPY --from=builder /app/tunnl /tunnl
