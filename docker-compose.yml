@@ -4,8 +4,7 @@ services:
     image: ghcr.io/yg070520/customtun:latest
     container_name: tunnl
     restart: unless-stopped
-    ports:
-      - "8888:8888"      # SSH tunnel connections
+    network_mode: "host"
     cap_drop:
       - ALL
     cap_add:
