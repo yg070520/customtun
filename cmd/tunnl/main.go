@@ -26,9 +26,9 @@ func main() {
 	if v := os.Getenv("SSH_ADDR"); v != "" {
 		cfg.SSHAddr = v
 	}
-	if v := os.Getenv("HOST_KEY_PATH"); v != "" {
-		cfg.HostKeyPath = v
-	}
+	//if v := os.Getenv("HOST_KEY_PATH"); v != "" {
+	//	cfg.HostKeyPath = v
+	//}
 	if v := os.Getenv("DOMAIN"); v != "" {
 		cfg.Domain = v
 	}
@@ -38,7 +38,7 @@ func main() {
 
 	srv, err := server.New(cfg.HostKeyPath, cfg.Domain, cfg.CaddyAdminURL)
 	if err != nil {
-		log.Fatalf("Failed to create server: %v", err)
+		log.Fatalf("Failed to create server:xxxx %v", err)
 	}
 
 	// Start SSH server
