@@ -6,7 +6,7 @@ import (
 
 const (
 	DefaultDomain   = "jatus.top"
-	MaxTunnelsPerIP = 3
+	MaxTunnelsPerIP = 5
 	MaxTotalTunnels = 1000
 
 	// SSH handshake timeout
