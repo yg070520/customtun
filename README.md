@@ -45,7 +45,7 @@ ssh -p 8888 -t -R 8080:localhost:8080 yourdomain.com
 ```
 Welcome to yourdomain.com!
 You can choose a custom subdomain or get a random one.
-Rules: 3-32 chars, lowercase letters, numbers, and hyphens only.
+Rules: 2-32 chars, lowercase letters, numbers, and hyphens only.
 
 Enter subdomain (or press Enter for random): myapp
 

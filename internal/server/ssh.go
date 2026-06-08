@@ -186,6 +186,10 @@ func (s *Server) HandleSSHConnection(conn net.Conn) {
 			}
 		}()
 
+		// Probe backend scheme now that the tunnel is ready
+		scheme := probeScheme(listenerAddr)
+		log.Printf("Backend scheme detected for %s: %s", domain, scheme)
+
 		// Optionally handle session channel if present (for interactive -t usage),
 		// but always keep connection alive via sshConn.Wait()
 		go func() {
@@ -218,6 +222,7 @@ func (s *Server) HandleSSHConnection(conn net.Conn) {
 					ansiBoldGreen + "Connection successful!" + ansiReset + "\r\n" +
 					ansiGray + "Assigned domain: " + ansiPurple + domain + ansiReset + "\r\n" +
 					ansiGray + "Forwarding:     " + ansiPurple + fmt.Sprintf("%s -> localhost:%d", domain, bind.port) + ansiReset + "\r\n" +
+					ansiGray + "Backend scheme: " + ansiPurple + scheme + ansiReset + "\r\n" +
 					ansiGray + "Press Ctrl+C to disconnect." + ansiReset + "\r\n\r\n"
 				fmt.Fprint(channel, message)
 
@@ -321,14 +326,6 @@ func (s *Server) HandleSSHConnection(conn net.Conn) {
 	log.Printf("Subdomain assigned: %s -> %s (client: %s, forward port: %d)",
 		domain, listenerAddr, sshConn.RemoteAddr(), bind.port)
 
-	message := "\r\n" +
-		ansiBoldGreen + "Connection successful!" + ansiReset + "\r\n" +
-		ansiGray + "Assigned domain: " + ansiPurple + domain + ansiReset + "\r\n" +
-		ansiGray + "Forwarding:     " + ansiPurple + fmt.Sprintf("%s -> localhost:%d", domain, bind.port) + ansiReset + "\r\n" +
-		ansiGray + "Press Ctrl+C to disconnect." + ansiReset + "\r\n\r\n"
-
-	fmt.Fprint(channel, message)
-
 	// Accept connections on the tunnel listener and forward to SSH client
 	go func() {
 		for {
@@ -339,6 +336,19 @@ func (s *Server) HandleSSHConnection(conn net.Conn) {
 			go s.forwardToSSH(sshConn, tcpConn, bind.addr, bind.port)
 		}
 	}()
+
+	// Probe backend scheme now that the tunnel is ready
+	scheme := probeScheme(listenerAddr)
+	log.Printf("Backend scheme detected for %s: %s", domain, scheme)
+
+	message := "\r\n" +
+		ansiBoldGreen + "Connection successful!" + ansiReset + "\r\n" +
+		ansiGray + "Assigned domain: " + ansiPurple + domain + ansiReset + "\r\n" +
+		ansiGray + "Forwarding:     " + ansiPurple + fmt.Sprintf("%s -> localhost:%d", domain, bind.port) + ansiReset + "\r\n" +
+		ansiGray + "Backend scheme: " + ansiPurple + scheme + ansiReset + "\r\n" +
+		ansiGray + "Press Ctrl+C to disconnect." + ansiReset + "\r\n\r\n"
+
+	fmt.Fprint(channel, message)
 
 	// Read from channel to detect disconnect or Ctrl+C
 	buf := make([]byte, 1)
@@ -424,7 +434,7 @@ func (s *Server) promptSubdomain(channel ssh.Channel, sshConn *ssh.ServerConn) s
 	welcome := "\r\n" +
 		ansiBoldGreen + "Welcome to " + s.domain + "!" + ansiReset + "\r\n" +
 		ansiGray + "You can choose a custom subdomain or get a random one." + ansiReset + "\r\n" +
-		ansiGray + "Rules: 3-32 chars, lowercase letters, numbers, and hyphens only." + ansiReset + "\r\n\r\n"
+		ansiGray + "Rules: 2-32 chars, lowercase letters, numbers, and hyphens only." + ansiReset + "\r\n\r\n"
 	fmt.Fprint(channel, welcome)
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {

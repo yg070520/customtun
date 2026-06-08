@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"time"
 )
 
 type caddyRoute struct {
@@ -65,6 +67,78 @@ func (s *Server) registerCaddyRoute(subdomain, domain, backendAddr string) error
 	}
 
 	return nil
+}
+
+// probeScheme detects whether the backend at addr speaks HTTP or HTTPS.
+// It sends a plain HTTP GET to the address; if the backend requires TLS
+// (evidenced by a TLS-bytes error or an HTTP 400 body mentioning SSL/HTTPS),
+// it returns "https". Otherwise it returns "http".
+func probeScheme(addr string) string {
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	resp, err := client.Get("http://" + addr + "/")
+	if err == nil {
+		defer resp.Body.Close()
+		// Some HTTPS servers (nginx, Apache) respond with HTTP 400 and a body
+		// like "The plain HTTP request was sent to HTTPS port".
+		if resp.StatusCode == http.StatusBadRequest {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+			lower := strings.ToLower(string(body))
+			if strings.Contains(lower, "ssl") || strings.Contains(lower, "https") {
+				return "https"
+			}
+		}
+		return "http"
+	}
+
+	// If the HTTP client received TLS bytes in response to a plain HTTP request,
+	// the error message contains "malformed HTTP response".
+	if strings.Contains(err.Error(), "malformed HTTP response") {
+		return "https"
+	}
+
+	return "http"
+}
+
+// probeScheme detects whether the backend at addr speaks HTTP or HTTPS.
+// It sends a plain HTTP GET to the address; if the backend requires TLS
+// (evidenced by a TLS-bytes error or an HTTP 400 body mentioning SSL/HTTPS),
+// it returns "https". Otherwise it returns "http".
+func probeScheme(addr string) string {
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	resp, err := client.Get("http://" + addr + "/")
+	if err == nil {
+		defer resp.Body.Close()
+		// Some HTTPS servers (nginx, Apache) respond with HTTP 400 and a body
+		// like "The plain HTTP request was sent to HTTPS port".
+		if resp.StatusCode == http.StatusBadRequest {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+			lower := strings.ToLower(string(body))
+			if strings.Contains(lower, "ssl") || strings.Contains(lower, "https") {
+				return "https"
+			}
+		}
+		return "http"
+	}
+
+	// If the HTTP client received TLS bytes in response to a plain HTTP request,
+	// the error message contains "malformed HTTP response".
+	if strings.Contains(err.Error(), "malformed HTTP response") {
+		return "https"
+	}
+
+	return "http"
 }
 
 // removeCaddyRoute removes a previously registered Caddy route by its @id.

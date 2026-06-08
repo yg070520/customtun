@@ -89,11 +89,11 @@ func IsValid(s string) bool {
 }
 
 // ValidateCustom validates a user-provided custom subdomain.
-// Rules: 3-32 characters, lowercase letters, numbers, and hyphens only.
+// Rules: 2-32 characters, lowercase letters, numbers, and hyphens only.
 // Cannot start or end with a hyphen, and no consecutive hyphens.
 func ValidateCustom(s string) error {
-	if len(s) < 3 {
-		return fmt.Errorf("too short (minimum 3 characters)")
+	if len(s) < 2 {
+		return fmt.Errorf("too short (minimum 2 characters)")
 	}
 	if len(s) > 32 {
 		return fmt.Errorf("too long (maximum 32 characters)")
