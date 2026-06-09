@@ -24,22 +24,40 @@ type caddyMatch struct {
 type caddyHandle struct {
 	Handler   string          `json:"handler"`
 	Upstreams []caddyUpstream `json:"upstreams"`
+	Transport *caddyTransport `json:"transport,omitempty"`
 }
 
 type caddyUpstream struct {
 	Dial string `json:"dial"`
 }
 
+type caddyTransport struct {
+	Protocol string    `json:"protocol"`
+	TLS      *caddyTLS `json:"tls,omitempty"`
+}
+
+type caddyTLS struct {
+	InsecureSkipVerify bool `json:"insecure_skip_verify"`
+}
+
 // registerCaddyRoute adds a reverse proxy route to Caddy for the given subdomain.
 // The route proxies traffic from `domain` to `backendAddr` (e.g. 127.0.0.1:xxxxx).
-func (s *Server) registerCaddyRoute(subdomain, domain, backendAddr string) error {
+// scheme should be "http" or "https"; when "https", a TLS transport is added.
+func (s *Server) registerCaddyRoute(subdomain, domain, backendAddr, scheme string) error {
+	handle := caddyHandle{
+		Handler:   "reverse_proxy",
+		Upstreams: []caddyUpstream{{Dial: backendAddr}},
+	}
+	if scheme == "https" {
+		handle.Transport = &caddyTransport{
+			Protocol: "http",
+			TLS:      &caddyTLS{InsecureSkipVerify: true},
+		}
+	}
 	route := caddyRoute{
-		ID:   "tunnel-" + subdomain,
-		Match: []caddyMatch{{Host: []string{domain}}},
-		Handle: []caddyHandle{{
-			Handler:   "reverse_proxy",
-			Upstreams: []caddyUpstream{{Dial: backendAddr}},
-		}},
+		ID:       "tunnel-" + subdomain,
+		Match:    []caddyMatch{{Host: []string{domain}}},
+		Handle:   []caddyHandle{handle},
 		Terminal: true,
 	}
 

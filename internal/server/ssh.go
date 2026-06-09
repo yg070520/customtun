@@ -167,7 +167,7 @@ func (s *Server) HandleSSHConnection(conn net.Conn) {
 		listenerAddr := tunnelListener.Addr().String()
 
 		log.Printf("Registering Caddy route: %s -> %s", domain, listenerAddr)
-		if err := s.registerCaddyRoute(sub, domain, listenerAddr); err != nil {
+		if err := s.registerCaddyRoute(sub, domain, listenerAddr, "http"); err != nil {
 			log.Printf("Failed to register Caddy route for %s: %v", sub, err)
 			return
 		}
@@ -189,6 +189,14 @@ func (s *Server) HandleSSHConnection(conn net.Conn) {
 		// Probe backend scheme now that the tunnel is ready
 		scheme := probeScheme(listenerAddr)
 		log.Printf("Backend scheme detected for %s: %s", domain, scheme)
+		if scheme == "https" {
+			_ = s.removeCaddyRoute(sub)
+			if err := s.registerCaddyRoute(sub, domain, listenerAddr, "https"); err != nil {
+				log.Printf("Failed to re-register Caddy route with TLS for %s: %v", sub, err)
+			} else {
+				log.Printf("Caddy route updated with TLS transport for %s", domain)
+			}
+		}
 
 		// Optionally handle session channel if present (for interactive -t usage),
 		// but always keep connection alive via sshConn.Wait()
@@ -302,9 +310,9 @@ func (s *Server) HandleSSHConnection(conn net.Conn) {
 	domain := fmt.Sprintf("%s.%s", sub, s.domain)
 	listenerAddr := tunnelListener.Addr().String()
 
-	// Register route with Caddy
+	// Register route with Caddy (initially HTTP; will be updated if HTTPS detected)
 	log.Printf("Registering Caddy route: %s -> %s", domain, listenerAddr)
-	if err := s.registerCaddyRoute(sub, domain, listenerAddr); err != nil {
+	if err := s.registerCaddyRoute(sub, domain, listenerAddr, "http"); err != nil {
 		log.Printf("Failed to register Caddy route for %s: %v", sub, err)
 		fmt.Fprintf(channel, ansiRed+"  Failed to register route: %s"+ansiReset+"\r\n", err)
 		return
@@ -340,6 +348,14 @@ func (s *Server) HandleSSHConnection(conn net.Conn) {
 	// Probe backend scheme now that the tunnel is ready
 	scheme := probeScheme(listenerAddr)
 	log.Printf("Backend scheme detected for %s: %s", domain, scheme)
+	if scheme == "https" {
+		_ = s.removeCaddyRoute(sub)
+		if err := s.registerCaddyRoute(sub, domain, listenerAddr, "https"); err != nil {
+			log.Printf("Failed to re-register Caddy route with TLS for %s: %v", sub, err)
+		} else {
+			log.Printf("Caddy route updated with TLS transport for %s", domain)
+		}
+	}
 
 	message := "\r\n" +
 		ansiBoldGreen + "Connection successful!" + ansiReset + "\r\n" +
